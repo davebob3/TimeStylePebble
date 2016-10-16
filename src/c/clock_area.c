@@ -1,51 +1,33 @@
 #include <pebble.h>
-#include <pebble-fctx/fctx.h>
-#include <pebble-fctx/fpath.h>
-#include <pebble-fctx/ffont.h>
 #include "clock_area.h"
 #include "settings.h"
 
 #define ROUND_VERTICAL_PADDING 15
 
-char time_hours[3];
-char time_minutes[3];
+static int tm_min;
+static int tm_hour;
 
 Layer* clock_area_layer;
-FFont* hours_font;
-FFont* minutes_font;
-
-// just allocate all the fonts at startup because i don't feel like
-// dealing with allocating and deallocating things
-FFont* avenir;
-FFont* avenir_bold;
-FFont* leco;
 
 GRect screen_rect;
 
-// "private" functions
-void update_fonts() {
-  switch(globalSettings.clockFontId) {
-    case FONT_SETTING_DEFAULT:
-        hours_font = avenir;
-        minutes_font = avenir;
-      break;
-    case FONT_SETTING_BOLD:
-        hours_font = avenir_bold;
-        minutes_font = avenir_bold;
-      break;
-    case FONT_SETTING_BOLD_H:
-        hours_font = avenir_bold;
-        minutes_font = avenir;
-      break;
-    case FONT_SETTING_BOLD_M:
-        hours_font = avenir;
-        minutes_font = avenir_bold;
-      break;
-    case FONT_SETTING_LECO:
-        hours_font = leco;
-        minutes_font = leco;
-      break;
-  }
+/**
+ * Draw a line with a given width.
+ */
+void graphics_draw_line_with_width(GContext *ctx, GPoint p0, GPoint p1, uint8_t width) {
+    graphics_context_set_stroke_width(ctx, width);
+    graphics_draw_line(ctx, p0, p1);
+}
+
+/**
+ * Returns a point on the line from the center away at an angle specified by tick/maxtick, at a specified distance
+ */
+GPoint get_radial_point(const GPoint center, const int16_t distance_from_center, const int32_t angle) {
+    GPoint result = {
+            .x = (int16_t) (sin_lookup(angle) * (int32_t) distance_from_center / TRIG_MAX_RATIO) + center.x,
+            .y = (int16_t) (-cos_lookup(angle) * (int32_t) distance_from_center / TRIG_MAX_RATIO) + center.y,
+    };
+    return result;
 }
 
 void update_clock_area_layer(Layer *l, GContext* ctx) {
@@ -56,67 +38,71 @@ void update_clock_area_layer(Layer *l, GContext* ctx) {
     bounds = GRect(0, ROUND_VERTICAL_PADDING, screen_rect.size.w, screen_rect.size.h - ROUND_VERTICAL_PADDING * 2);
   #endif
   
-  // initialize FCTX, the fancy 3rd party drawing library that all the cool kids use
-  FContext fctx;
+      // hour ticks
+    uint8_t tick_width = 2;
+    int16_t radius = (bounds.size.w-31) / 2;
+    GPoint center = grect_center_point(&bounds);
 
-  fctx_init_context(&fctx, ctx);
-  fctx_set_color_bias(&fctx, 0);
-  fctx_set_fill_color(&fctx, globalSettings.timeColor);
-  
+    // avenir + avenir bold metrics
+    //int v_padding = bounds.size.h / 16;
+    int h_adjust = 0;
+    //int v_adjust = 0;
 
-  // calculate font size
-  int font_size = 4 * bounds.size.h / 7;
-
-  // avenir + avenir bold metrics
-  int v_padding = bounds.size.h / 16;
-  int h_adjust = 0;
-  int v_adjust = 0;
-
-  // alternate metrics for LECO
-  if(globalSettings.clockFontId == FONT_SETTING_LECO) {
-    v_padding = bounds.size.h / 13;
-    h_adjust = -2;
-
-    // leco looks awful with antialiasing
-    #ifdef PBL_COLOR
-      fctx_enable_aa(false);
+    // if it's a round watch, EVERYTHING CHANGES
+    #ifdef PBL_ROUND
+      //v_adjust = ROUND_VERTICAL_PADDING;
+    #else
+      // for rectangular watches, adjust X position based on sidebar position 
+      if(globalSettings.sidebarOnLeft) {
+        h_adjust += 15;
+      } else {
+        h_adjust -= 16;
+      }
     #endif
-  }
+    center.x += h_adjust;
 
-  // if it's a round watch, EVERYTHING CHANGES
-  #ifdef PBL_ROUND
-    v_adjust = ROUND_VERTICAL_PADDING;
+    graphics_context_set_stroke_color(ctx, globalSettings.timeColor);
+    for (int i = 0; i < 12; ++i) 
+    {
+        int32_t angle = i * TRIG_MAX_ANGLE / 12;
+        int tick_length = PBL_IF_ROUND_ELSE(8, 6);
 
-    if(globalSettings.clockFontId != FONT_SETTING_LECO) {
-      h_adjust = -1;
+        graphics_draw_line_with_width(ctx, get_radial_point(center, radius + PBL_IF_ROUND_ELSE(3, 0), angle),
+                                      get_radial_point(center, radius - tick_length, angle),
+                                      tick_width);
     }
-  #else
-    // for rectangular watches, adjust X position based on sidebar position 
-    if(globalSettings.sidebarOnLeft) {
-      h_adjust += 15;
-    } else {
-      h_adjust -= 16;
+
+    // only relevant minute ticks
+    int start_min_tick = (tm_min / 5) * 5;
+    for (int i = start_min_tick; i < start_min_tick + 5; ++i) 
+    {
+        int32_t angle = i * TRIG_MAX_ANGLE / 60;
+        graphics_draw_line_with_width(ctx, get_radial_point(center, radius + PBL_IF_ROUND_ELSE(3, 0), angle),
+                                      get_radial_point(center, radius - PBL_IF_ROUND_ELSE(5, 3), angle), 1);
     }
-  #endif
 
-  FPoint time_pos;
-  fctx_begin_fill(&fctx);
-  fctx_set_text_size(&fctx, hours_font, font_size);
-  fctx_set_text_size(&fctx, minutes_font, font_size);
+        // compute angles
+    int32_t minute_angle = tm_min * TRIG_MAX_ANGLE / 60;
+    GPoint minute_hand = get_radial_point(center, radius - PBL_IF_ROUND_ELSE(16, 10), minute_angle);
+    int hour_tick = ((tm_hour % 12) * 6) + (tm_min / 10);
+    int32_t hour_angle = hour_tick * TRIG_MAX_ANGLE / (12 * 6);
+    GPoint hour_hand = get_radial_point(center, radius * 55 / 100, hour_angle);
 
-  // draw hours
-  time_pos.x = INT_TO_FIXED(bounds.size.w / 2 + h_adjust);
-  time_pos.y = INT_TO_FIXED(v_padding + v_adjust);
-  fctx_set_offset(&fctx, time_pos);
-  fctx_draw_string(&fctx, time_hours, hours_font, GTextAlignmentCenter, FTextAnchorTop);
+        // minute hand
+    graphics_context_set_stroke_color(ctx, globalSettings.timeColor);
+    graphics_draw_line_with_width(ctx, minute_hand, center, 4);
+    graphics_context_set_stroke_color(ctx, globalSettings.timeBgColor);
+    graphics_draw_line_with_width(ctx, get_radial_point(center, radius - PBL_IF_ROUND_ELSE(20, 12), minute_angle), center, 1);
 
-  //draw minutes 
-  time_pos.y = INT_TO_FIXED(bounds.size.h - v_padding + v_adjust);
-  fctx_set_offset(&fctx, time_pos);
-  fctx_draw_string(&fctx, time_minutes, minutes_font, GTextAlignmentCenter, FTextAnchorBaseline);
-  fctx_end_fill(&fctx);
+    // hour hand
+    graphics_context_set_stroke_color(ctx, globalSettings.timeColor);
+    graphics_draw_line_with_width(ctx, hour_hand, center, 4);
+    graphics_context_set_stroke_color(ctx, globalSettings.timeBgColor);
+    graphics_draw_line_with_width(ctx, get_radial_point(center, radius * 55 / 100 - 2, hour_angle), center, 1);
 
-  fctx_deinit_context(&fctx);
+    // dot in the middle
+    graphics_context_set_fill_color(ctx, globalSettings.timeColor);
+    graphics_fill_circle(ctx, center, 5);
 }
 
 
@@ -132,41 +118,19 @@ void ClockArea_init(Window* window) {
   layer_add_child(window_get_root_layer(window), clock_area_layer);
   layer_set_update_proc(clock_area_layer, update_clock_area_layer);
 
-  // allocate fonts
-  avenir =      ffont_create_from_resource(RESOURCE_ID_AVENIR_REGULAR_FFONT);
-  avenir_bold = ffont_create_from_resource(RESOURCE_ID_AVENIR_BOLD_FFONT);
-  leco =        ffont_create_from_resource(RESOURCE_ID_LECO_REGULAR_FFONT);
-
-  // select fonts based on settings
-  update_fonts();
 }
 
 void ClockArea_deinit() {
   layer_destroy(clock_area_layer);
-
-  ffont_destroy(avenir);
-  ffont_destroy(avenir_bold);
-  ffont_destroy(leco);
 }
 
 void ClockArea_redraw() {
-  // check if the fonts need to be switched
-  update_fonts();
-
   layer_mark_dirty(clock_area_layer);  
 }
 
 void ClockArea_update_time(struct tm* time_info) {
 
-  // hours
-  if (clock_is_24h_style()) {
-    strftime(time_hours, sizeof(time_hours), (globalSettings.showLeadingZero) ? "%H" : "%k", time_info);
-  } else {
-    strftime(time_hours, sizeof(time_hours), (globalSettings.showLeadingZero) ? "%I" : "%l", time_info);
-  }
-
-  // minutes
-  strftime(time_minutes, sizeof(time_minutes), "%M", time_info);
-
+  tm_min = time_info->tm_min;
+  tm_hour = time_info->tm_hour;
   ClockArea_redraw();
 }
